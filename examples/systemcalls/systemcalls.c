@@ -1,4 +1,11 @@
 #include "systemcalls.h"
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -16,6 +23,16 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+    if (cmd == NULL)
+    {
+        return false;
+    }
+
+    int retval = system(cmd);
+    if (retval != 0)
+    {
+        return false;
+    }
 
     return true;
 }
@@ -45,10 +62,7 @@ bool do_exec(int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
-
+    
 /*
  * TODO:
  *   Execute a system command by calling fork, execv(),
@@ -58,10 +72,52 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    bool retval = true;
 
+    int pid = fork();
+    if (pid < 0)
+    {
+        perror("fork failed");
+        retval = false;
+        goto cleanup;
+    }
+
+    if (pid == 0)
+    {
+        // Child
+        execv(command[0], command);
+
+        perror("execv failed");
+        _exit(-1);
+    }
+
+    // Parent
+    int status;
+    if (waitpid(pid, &status, 0) < 0)
+    {
+        perror("waitpid failed");
+        retval = false;
+        goto cleanup;
+    }
+
+    if (!WIFEXITED(status))
+    {
+        printf("Child didn't exited normally\n");
+        retval = false;
+        goto cleanup;
+    }
+
+    int command_retval = WEXITSTATUS(status);
+    if (command_retval != 0)
+    {
+        printf("Command returned with %d\n", command_retval);
+        retval = false;
+        goto cleanup;
+    }
+
+cleanup:
     va_end(args);
-
-    return true;
+    return retval;
 }
 
 /**
@@ -93,7 +149,66 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *
 */
 
-    va_end(args);
+    bool retval = true;
+    int fd = -1;
 
-    return true;
+    fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd < 0)
+    {
+        perror("open failed");
+        retval = false;
+        goto cleanup;
+    }
+
+    int pid = fork();
+    if (pid < 0)
+    {
+        perror("fork failed");
+        retval = false;
+        goto cleanup;
+    }
+
+    if (pid == 0)
+    {
+        // Child
+        if (dup2(fd, 1) < 0)
+        {
+            perror("dup2 failed");
+            _exit(-1);
+        }
+
+        execv(command[0], command);
+
+        perror("execv failed");
+        _exit(-1);
+    }
+
+    // Parent
+    int status;
+    if (waitpid(pid, &status, 0) < 0)
+    {
+        perror("waitpid failed");
+        retval = false;
+        goto cleanup;
+    }
+
+    if (!WIFEXITED(status))
+    {
+        printf("Child didn't exited normally\n");
+        retval = false;
+        goto cleanup;
+    }
+
+    int command_retval = WEXITSTATUS(status);
+    if (command_retval != 0)
+    {
+        printf("Command returned with %d", command_retval);
+        retval = false;
+        goto cleanup;
+    }
+
+cleanup:
+    close(fd);
+    va_end(args);
+    return retval;
 }
