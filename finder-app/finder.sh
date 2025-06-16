@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 if [ "$#" -ne 2 ]; then
     echo "Should receive 2 args exactly"
