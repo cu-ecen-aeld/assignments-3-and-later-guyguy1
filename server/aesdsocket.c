@@ -11,10 +11,27 @@
 #include <syslog.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <pthread.h>
+#include <stdbool.h>
+
+#include "queue.h"
 
 #define DATA_FILE "/var/tmp/aesdsocketdata"
 
+struct thread_data
+{
+    pthread_t thread_id;
+    int socket_fd;
+    struct in_addr client_addr;
+    pthread_mutex_t *data_file_mutex;
+    SLIST_ENTRY(thread_data) next;
+
+    bool success;
+    bool is_finished;
+};
+
 static int exit_requested = 0;
+static SLIST_HEAD(thread_list_head, thread_data) threads;
 
 void signal_handler(int signo) {
     (void)signo;
@@ -58,19 +75,110 @@ void daemonize() {
     close(fd);
 }
 
+void* thread_func(void *arg)
+{
+    struct thread_data *data = (struct thread_data *)arg;
+    int client_fd = data->socket_fd;
+    char *packet = NULL;
+    size_t packet_size = 0;
+    char buffer[1024];
+    ssize_t bytes_received;
+    ssize_t bytes_read;
+    FILE *data_file = NULL;
+    bool success = false;
+
+    syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(data->client_addr));
+
+    while (1)
+    {
+        bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
+        if (bytes_received <= 0) {
+            break;
+        }
+
+        packet = realloc(packet, packet_size + bytes_received + 1);
+        if (!packet) {
+            syslog(LOG_ERR, "realloc failed");
+            goto cleanup;
+        }
+
+        memcpy(packet + packet_size, buffer, bytes_received);
+        packet_size += bytes_received;
+        packet[packet_size] = '\0';
+
+        if (strchr(packet, '\n')) {
+            break;
+        }
+    }
+
+    if (pthread_mutex_lock(data->data_file_mutex) != 0)
+    {
+        syslog(LOG_ERR, "lock failed");
+        goto cleanup;
+    }
+    
+    data_file = fopen(DATA_FILE, "a");
+    if (!data_file) {
+        syslog(LOG_ERR, "fopen() for appending to %s failed: %s", DATA_FILE, strerror(errno));
+        pthread_mutex_unlock(data->data_file_mutex);
+        goto cleanup;
+    }
+    fwrite(packet, 1, packet_size, data_file);
+    fflush(data_file);
+
+    free(packet);
+    fclose(data_file);
+    data_file = NULL;
+
+    data_file = fopen(DATA_FILE, "r");
+    if (data_file == NULL)
+    {
+        syslog(LOG_ERR, "fopen for reading %s failed: %s", DATA_FILE, strerror(errno));
+        pthread_mutex_unlock(data->data_file_mutex);
+        goto cleanup;
+    }
+
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), data_file)) > 0) {
+        send(client_fd, buffer, bytes_read, 0);
+    }
+
+    fclose(data_file);
+    data_file = NULL;
+
+    if (pthread_mutex_unlock(data->data_file_mutex) != 0)
+    {
+        syslog(LOG_ERR, "unlock failed");
+        goto cleanup;
+    }
+
+    success = true;
+
+cleanup:
+    if (data_file != NULL)
+    {
+        fclose(data_file);
+    }
+    close(client_fd);
+    syslog(LOG_INFO, "Closed connection from %s", inet_ntoa(data->client_addr));
+
+    data->success = success;
+    data->is_finished = true;
+
+    return NULL;
+}
+
 int main(int argc, char *argv[]) {
     int server_fd = -1;
     int client_fd = -1;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len = sizeof(client_addr);
-    char buffer[1024];
-    char *packet = NULL;
-    size_t packet_size = 0;
-    ssize_t bytes_received;
-    ssize_t bytes_read;
+    pthread_mutex_t data_file_mutex = {0};
+    struct thread_data *thread_data = NULL;
 
+    SLIST_FIRST(&threads) = NULL;
     openlog("aesdsocket", LOG_PID, LOG_USER);
     setup_signal_handling();
+    pthread_mutex_init(&data_file_mutex, NULL);
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1) {
@@ -113,56 +221,42 @@ int main(int argc, char *argv[]) {
             return -1;
         }
 
-        syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(client_addr.sin_addr));
-        FILE *data_file = fopen(DATA_FILE, "a");
-        if (!data_file) {
-            syslog(LOG_ERR, "fopen() for appending to %s failed: %s", DATA_FILE, strerror(errno));
+        thread_data = (struct thread_data *)malloc(sizeof(struct thread_data));
+        if (thread_data == NULL)
+        {
+            syslog(LOG_ERR, "malloc failed");
+            return -1;
+        }
+        memset(thread_data, 0, sizeof(struct thread_data));
+
+        thread_data->socket_fd = client_fd;
+        thread_data->client_addr = client_addr.sin_addr;
+        thread_data->data_file_mutex = &data_file_mutex;
+        SLIST_INSERT_HEAD(&threads, thread_data, next);
+
+        if (pthread_create(&thread_data->thread_id, NULL, thread_func, thread_data) != 0)
+        {
+            syslog(LOG_ERR, "pthread_create failed");
             return -1;
         }
 
-        packet = NULL;
-        packet_size = 0;
-
-        while (1)
+        struct thread_data *current = NULL, *next = NULL;
+        SLIST_FOREACH_SAFE(current, &threads, next, next)
         {
-            bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
-            if (bytes_received <= 0) {
-                break;
-            }
+            if (current->is_finished)
+            {
+                syslog(LOG_INFO, "Thread %ld finished with %s", current->thread_id, current->success ? "success" : "failure");
+                SLIST_REMOVE(&threads, current, thread_data, next);
 
-            packet = realloc(packet, packet_size + bytes_received + 1);
-            if (!packet) {
-                syslog(LOG_ERR, "realloc failed");
-                return -1;
-            }
+                if (pthread_join(current->thread_id, NULL) != 0)
+                {
+                    syslog(LOG_ERR, "pthread_join failed");
+                    return -1;
+                }
 
-            memcpy(packet + packet_size, buffer, bytes_received);
-            packet_size += bytes_received;
-            packet[packet_size] = '\0';
-
-            if (strchr(packet, '\n')) {
-                fwrite(packet, 1, packet_size, data_file);
-                fflush(data_file);
-                break;
+                free(current);
             }
         }
-
-        free(packet);
-        fclose(data_file);
-
-        data_file = fopen(DATA_FILE, "r");
-        if (data_file == NULL)
-        {
-            syslog(LOG_ERR, "fopen for reading %s failed: %s", DATA_FILE, strerror(errno));
-        }
-
-        while ((bytes_read = fread(buffer, 1, sizeof(buffer), data_file)) > 0) {
-            send(client_fd, buffer, bytes_read, 0);
-        }
-        fclose(data_file);
-
-        syslog(LOG_INFO, "Closed connection from %s", inet_ntoa(client_addr.sin_addr));
-        close(client_fd);
     }
 
     close(server_fd);
