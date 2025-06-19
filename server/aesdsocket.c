@@ -1,3 +1,4 @@
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -167,6 +168,56 @@ cleanup:
     return NULL;
 }
 
+void* timestamp_thread_func(void *arg)
+{
+    pthread_mutex_t *data_file_mutex = (pthread_mutex_t *)arg;
+
+    while (1) {
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+
+        if (!tm_info) {
+            syslog(LOG_ERR,"localtime failed");
+            exit(-1);
+        }
+
+        char time_str[128];
+
+        if (strftime(time_str, sizeof(time_str), "%a, %d %b %Y %H:%M:%S %z", tm_info) == 0) {
+            syslog(LOG_ERR, "strftime returned 0");
+            exit(-1);
+        }
+
+        syslog(LOG_DEBUG, "timestamp thread: locking and writng timestamp %s", time_str);
+
+        if (pthread_mutex_lock(data_file_mutex) != 0)
+        {
+            syslog(LOG_ERR, "lock failed in timestamp thread");
+            exit(-1);
+        }
+
+        FILE *data_file = fopen(DATA_FILE, "a");
+        if (data_file == NULL) {
+            syslog(LOG_ERR,"fopen %s failed in timestamp thread", DATA_FILE);
+            exit(-1);
+        }
+
+        fprintf(data_file, "timestamp:%s\n", time_str);
+        fflush(data_file);
+        fclose(data_file);
+
+        if (pthread_mutex_unlock(data_file_mutex) != 0)
+        {
+            syslog(LOG_ERR, "unlock failed in timestamp thread");
+            exit(-1);
+        }
+
+        sleep(10);
+    }
+
+    return NULL;
+}
+
 int main(int argc, char *argv[]) {
     int server_fd = -1;
     int client_fd = -1;
@@ -207,6 +258,13 @@ int main(int argc, char *argv[]) {
     if (listen(server_fd, 10) == -1) {
         syslog(LOG_ERR, "listen() failed: %s", strerror(errno));
         close(server_fd);
+        return -1;
+    }
+
+    pthread_t timestamp_thread;
+    if (pthread_create(&timestamp_thread, NULL, timestamp_thread_func, &data_file_mutex) != 0)
+    {
+        syslog(LOG_ERR, "pthread_create timestamp thread failed");
         return -1;
     }
 
