@@ -10,6 +10,7 @@
 
 #ifdef __KERNEL__
 #include <linux/string.h>
+#include <linux/slab.h>
 #else
 #include <string.h>
 #include <stdio.h>
@@ -80,8 +81,13 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
 {
     if (buffer->full && buffer->in_offs != buffer->out_offs)
     {
-        printf("ERROR: buffer is marked full but in_offs = %d, out_offs = %d\n", buffer->in_offs, buffer->out_offs);
-        exit(-1);
+        printk("ERROR: buffer is marked full but in_offs = %d, out_offs = %d\n", buffer->in_offs, buffer->out_offs);
+        return;
+    }
+
+    if (buffer->full)
+    {
+        kfree(buffer->entry[buffer->in_offs].buffptr);
     }
 
     buffer->entry[buffer->in_offs].buffptr = add_entry->buffptr;
@@ -92,8 +98,8 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
     // Check wrap around
     if (buffer->in_offs > BUFFER_SIZE)
     {
-        printf("ERROR: buffer->in_offs is too big (%d)\n", buffer->in_offs);
-        exit(-1);
+        printk("ERROR: buffer->in_offs is too big (%d)\n", buffer->in_offs);
+        return;
     }
     else if (buffer->in_offs == BUFFER_SIZE)
     {

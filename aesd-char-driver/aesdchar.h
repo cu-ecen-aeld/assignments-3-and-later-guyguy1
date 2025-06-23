@@ -4,11 +4,12 @@
  *  Created on: Oct 23, 2019
  *      Author: Dan Walkes
  */
+#include "aesd-circular-buffer.h"
 
 #ifndef AESD_CHAR_DRIVER_AESDCHAR_H_
 #define AESD_CHAR_DRIVER_AESDCHAR_H_
 
-#define AESD_DEBUG 1  //Remove comment on this line to enable debug
+// #define AESD_DEBUG 1  //Remove comment on this line to enable debug
 
 #undef PDEBUG             /* undef it, just in case */
 #ifdef AESD_DEBUG
@@ -25,10 +26,11 @@
 
 struct aesd_dev
 {
-    /**
-     * TODO: Add structure(s) and locks needed to complete assignment requirements
-     */
     struct cdev cdev;     /* Char device structure      */
+    struct mutex lock;
+    struct aesd_circular_buffer circular_buffer;
+    char *pending_buffer;
+    size_t pending_buffer_size;
 };
 
 

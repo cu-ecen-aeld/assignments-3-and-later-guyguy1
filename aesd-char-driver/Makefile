@@ -4,8 +4,10 @@
 
 # Add your debugging flag (or not) to CFLAGS
 ifeq ($(DEBUG),y)
-  DEBFLAGS = -O -g -DSCULL_DEBUG # "-O" is needed to expand inlines
+  $(info ----Compiling for debug----)
+  DEBFLAGS = -O -g -DAESD_DEBUG # "-O" is needed to expand inlines
 else
+  $(info ----Compiling for release----)
   DEBFLAGS = -O2
 endif
 
@@ -26,5 +28,5 @@ modules:
 endif
 
 clean:
-	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions
+	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod *.mod.c .tmp_versions Module.symvers modules.order
 
