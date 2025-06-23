@@ -17,7 +17,11 @@
 
 #include "queue.h"
 
-#define DATA_FILE "/var/tmp/aesdsocketdata"
+#ifdef USE_AESD_CHAR_DEVICE
+    #define DATA_FILE "/dev/aesdchar"
+#else
+    #define DATA_FILE "/var/tmp/aesdsocketdata"
+#endif
 
 struct thread_data
 {
@@ -261,12 +265,14 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_t timestamp_thread;
     if (pthread_create(&timestamp_thread, NULL, timestamp_thread_func, &data_file_mutex) != 0)
     {
         syslog(LOG_ERR, "pthread_create timestamp thread failed");
         return -1;
     }
+#endif
 
     while (!exit_requested) {
         client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
@@ -317,8 +323,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    close(server_fd);
+#ifndef USE_AESD_CHAR_DEVICE
     unlink(DATA_FILE);
+#endif
+
+    close(server_fd);
     closelog();
     return 0;
 }
