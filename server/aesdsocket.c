@@ -16,12 +16,15 @@
 #include <stdbool.h>
 
 #include "queue.h"
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #ifdef USE_AESD_CHAR_DEVICE
     #define DATA_FILE "/dev/aesdchar"
 #else
     #define DATA_FILE "/var/tmp/aesdsocketdata"
 #endif
+
+#define SEEKTO_MAGIC "AESDCHAR_IOCSEEKTO:"
 
 struct thread_data
 {
@@ -80,6 +83,60 @@ void daemonize() {
     close(fd);
 }
 
+static void do_seek_to(struct thread_data *data, char* packet)
+{
+    int client_fd = data->socket_fd;
+    FILE *data_file = NULL;
+    bool success = false;
+    struct aesd_seekto seekto = {0};
+    char buffer[1024];
+    ssize_t bytes_read;
+
+    if (pthread_mutex_lock(data->data_file_mutex) != 0)
+    {
+        syslog(LOG_ERR, "lock failed");
+        goto cleanup;
+    }
+
+    if (sscanf(packet, SEEKTO_MAGIC "%u,%u", &seekto.write_cmd, &seekto.write_cmd_offset) != 2)
+    {
+        syslog(LOG_ERR, "Invalid seekto packet: %s", packet);
+        goto cleanup;
+    }
+
+    data_file = fopen(DATA_FILE, "r+");
+    if (!data_file) {
+        syslog(LOG_ERR, "fopen(%s, r+) failed: %s", DATA_FILE, strerror(errno));
+        goto cleanup;
+    }
+
+    if (ioctl(fileno(data_file), AESDCHAR_IOCSEEKTO, &seekto) != 0)
+    {
+        syslog(LOG_ERR, "ioctl_seekto(%u, %u) failed : %s", seekto.write_cmd, seekto.write_cmd_offset, strerror(errno));
+        goto cleanup;
+    }
+
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), data_file)) > 0) {
+        send(client_fd, buffer, bytes_read, 0);
+    }
+
+    success = true;
+
+cleanup:
+    if (data_file != NULL)
+    {
+        fclose(data_file);
+    }
+    pthread_mutex_unlock(data->data_file_mutex);
+    free(packet);
+
+    close(client_fd);
+    syslog(LOG_INFO, "Closed connection from %s", inet_ntoa(data->client_addr));
+
+    data->success = success;
+    data->is_finished = true;
+}
+
 void* thread_func(void *arg)
 {
     struct thread_data *data = (struct thread_data *)arg;
@@ -114,6 +171,12 @@ void* thread_func(void *arg)
         if (strchr(packet, '\n')) {
             break;
         }
+    }
+
+    if (memcmp(packet, SEEKTO_MAGIC, strlen(SEEKTO_MAGIC)) == 0)
+    {
+        do_seek_to(data, packet);
+        return NULL;
     }
 
     if (pthread_mutex_lock(data->data_file_mutex) != 0)
