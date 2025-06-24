@@ -18,6 +18,7 @@
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
 
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
@@ -157,12 +158,100 @@ cleanup:
     return retval;
 }
 
+static loff_t aesd_llseek(struct file *filp, loff_t off, int whence)
+{
+    loff_t newpos;
+    struct aesd_dev *device = filp->private_data;
+    size_t num_bytes_in_buffer = 0;
+
+    if (mutex_lock_interruptible(&device->lock))
+        return -ERESTARTSYS;
+
+    switch(whence) {
+    
+    case SEEK_SET:
+        newpos = off;
+        break;
+
+    case SEEK_CUR:
+        newpos = filp->f_pos + off;
+        break;
+
+    case SEEK_END:
+        num_bytes_in_buffer = aesd_circular_buffer_get_num_bytes(&device->circular_buffer);
+        newpos = num_bytes_in_buffer + off;
+        break;
+
+    default:
+        newpos = -EINVAL;
+        goto cleanup;
+    }
+
+    if (newpos < 0)
+    {
+        newpos = -EINVAL;
+        goto cleanup;
+    }
+
+    filp->f_pos = newpos;
+
+cleanup:
+    mutex_unlock(&device->lock);
+    return newpos;
+}
+
+static long aesd_seek_to(struct file *filp, struct aesd_dev *device, unsigned long aesd_seekto_user_address)
+{
+    long retval = 0;
+    struct aesd_seekto seekto = {0};
+
+    if (copy_from_user(&seekto, (const void __user *)aesd_seekto_user_address, sizeof(seekto)) != 0)
+    {
+        return -EFAULT;
+    }
+
+    retval = aesd_circular_buffer_calculate_offset(&device->circular_buffer, seekto.write_cmd, seekto.write_cmd_offset);
+    if (retval < 0)
+    {
+        return retval;
+    }
+
+    filp->f_pos = retval;
+    return 0;
+}
+
+static long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+    long retval = 0;
+    struct aesd_dev *device = filp->private_data;
+
+    if (mutex_lock_interruptible(&device->lock))
+        return -ERESTARTSYS;
+
+    switch (cmd) {
+
+    case AESDCHAR_IOCSEEKTO:
+        retval = aesd_seek_to(filp, device, arg);
+        break;
+
+    default:
+        retval = -EINVAL;
+        goto cleanup;
+    }
+
+cleanup:
+    mutex_unlock(&device->lock);
+    return retval;
+}
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
+    .llseek =   aesd_llseek,
     .read =     aesd_read,
     .write =    aesd_write,
     .open =     aesd_open,
     .release =  aesd_release,
+    .unlocked_ioctl = aesd_ioctl,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)

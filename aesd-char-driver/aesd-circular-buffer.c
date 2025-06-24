@@ -70,6 +70,57 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     return NULL;
 }
 
+size_t aesd_circular_buffer_get_num_bytes(struct aesd_circular_buffer* buffer)
+{
+    uint8_t num_entries = get_number_of_entries(buffer);
+    size_t result = 0;
+
+    for (int i = 0; i < num_entries; ++i)
+    {
+        uint8_t entry_index = (buffer->out_offs + i) % BUFFER_SIZE;
+        struct aesd_buffer_entry *entry = &buffer->entry[entry_index];
+
+        result += entry->size;
+    }
+
+    return result;
+}
+
+long aesd_circular_buffer_calculate_offset(struct aesd_circular_buffer *buffer, 
+                                           uint32_t entry_index,
+                                           uint32_t offset_in_entry)
+{
+    uint8_t num_entries = get_number_of_entries(buffer);
+    long result = 0;
+
+    if (entry_index >= num_entries)
+    {
+        return -EINVAL;
+    }
+
+    for (int i = 0; i <= entry_index; ++i)
+    {
+        uint8_t current_entry_index = (buffer->out_offs + i) % BUFFER_SIZE;
+        struct aesd_buffer_entry *entry = &buffer->entry[current_entry_index];
+
+        if (i == entry_index)
+        {
+            if (offset_in_entry >= entry->size)
+            {
+                return -EINVAL;
+            }
+
+            result += offset_in_entry;
+            return result;
+        }
+
+        result += entry->size;
+    }
+
+    printk("ERROR: This place should be impossible to reach");
+    return -1;
+}
+
 /**
 * Adds entry @param add_entry to @param buffer in the location specified in buffer->in_offs.
 * If the buffer was already full, overwrites the oldest entry and advances buffer->out_offs to the
